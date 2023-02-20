@@ -10,6 +10,7 @@ Tested only on 2000 image celebahq dataset for small amount of time. Not sure if
 - Add captions in sampling time during training to get correct output.
 - Reduce embedding and time dimension tensor dimension fixing code.
 - Fix gif generation code.
+- Fix unconditional training.
 
 ### Codes
 | Name | Description |
