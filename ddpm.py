@@ -870,7 +870,12 @@ class Trainer:
                         accumulated_minibatch_loss = 0.0
 
                     if not batch_idx % self.save_every:
-                        self.sample(epoch=epoch, batch_idx=batch_idx, sample_count=self.sample_count)
+                        self.sample(
+                            epoch=epoch,
+                            batch_idx=batch_idx,
+                            sample_count=self.sample_count,
+                            sentence_embedding=sentence_embedding[0].unsqueeze(dim=1)
+                        )
 
                         Utils.save_checkpoint(
                             epoch=epoch,
