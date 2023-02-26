@@ -109,7 +109,7 @@ class TestImagen:
         # x: Tensor, shape[seq_len, batch_size, embedding_dim]
         embedding_dim = 768
         num_channels = 3
-        hw = 64
+        hw = 256
         b = 4
         x = torch.randn((b, num_channels, hw, hw), device=self.device)
         print(f'in: {x.shape}')
@@ -121,11 +121,12 @@ class TestImagen:
             in_channels=num_channels,
             cond_embed_dim=embedding_dim,
             base_channel_dim=64,
-            use_attention=True,
             num_resnet_blocks=(2, 1, 1),
             channel_mults=(2, 1, 2),
             contextual_text_embed_dim=embedding_dim,
-            use_text_conditioning=True,
+            use_text_conditioning=(False, True, True),
+            use_attention=(False, True, True),
+            attn_resolution=(32, 16, 8),
         ).to(self.device)
         out = t_enc(x, cond_embedding, context_embedding, context_mask_embedding)
         print(f'out: {out.shape}')
