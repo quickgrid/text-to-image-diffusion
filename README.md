@@ -1,7 +1,7 @@
 # text-to-image-diffusion
 Experimental (working!) custom implementation of conditional and unconditional diffusion for testing new methods. Based on [this repo](https://github.com/quickgrid/pytorch-diffusion). 
 
-Tested only on 2000 image celebahq dataset for small amount of time. Not sure if actually working.
+`ddpm.py` tested only on 2000 image celebahq dataset for small amount of time and somewhat works.
 
 ### Recommended 
 - `accumulation_iters` * `batch_size` atleast 16.
