@@ -6,11 +6,14 @@ References:
     - Self Attention paper, https://arxiv.org/abs/1706.03762.
     - Vision Transformers paper, https://arxiv.org/pdf/2010.11929.pdf.
 """
+import math
 from typing import Tuple, Union
 
 import numpy as np
 import torch
 from torch import nn
+from torch.functional import F
+from tqdm import tqdm
 
 from memory_efficient_attention import Attention
 
@@ -248,11 +251,169 @@ class EfficientUNetUBlock(nn.Module):
         return x
 
 
+class PositionalEncoding(nn.Module):
+    def __init__(
+            self,
+            embedding_dim: int,
+            dropout: float = 0.1,
+            max_len: int = 1000,
+    ):
+        """Section 3.5 of attention is all you need paper.
+
+        Extended slicing method is used to fill even and odd position of sin, cos with increment of 2.
+        Ex, `[sin, cos, sin, cos, sin, cos]` for `embedding_dim = 6`.
+
+        `max_len` is equivalent to number of noise steps or patches. `embedding_dim` must same as image
+        embedding dimension of the model.
+
+        Args:
+            embedding_dim: `d_model` in given positional encoding formula.
+            dropout: Dropout amount.
+            max_len: Number of embeddings to generate. Here, equivalent to total noise steps.
+        """
+        super(PositionalEncoding, self).__init__()
+        self.dropout = nn.Dropout(p=dropout)
+
+        pos_encoding = torch.zeros(max_len, embedding_dim)
+        position = torch.arange(start=0, end=max_len).unsqueeze(1)
+        div_term = torch.exp(-math.log(10000.0) * torch.arange(0, embedding_dim, 2).float() / embedding_dim)
+
+        pos_encoding[:, 0::2] = torch.sin(position * div_term)
+        pos_encoding[:, 1::2] = torch.cos(position * div_term)
+        self.register_buffer(name='pos_encoding', tensor=pos_encoding, persistent=False)
+
+    def forward(self, t: torch.LongTensor) -> torch.Tensor:
+        """Get precalculated positional embedding at timestep t. Outputs same as video implementation
+        code but embeddings are in [sin, cos, sin, cos] format instead of [sin, sin, cos, cos] in that code.
+        Also batch dimension is added to final output.
+        """
+        positional_encoding = self.pos_encoding[t].squeeze(1)
+        return self.dropout(positional_encoding)
+
+
+class Diffusion:
+    def __init__(
+            self,
+            device: str,
+            img_size: int,
+            noise_steps: int = 1000,
+            beta_start: float = 1e-4,
+            beta_end: float = 0.02,
+    ):
+        self.device = device
+        self.noise_steps = noise_steps
+        self.beta_start = beta_start
+        self.beta_end = beta_end
+        self.img_size = img_size
+
+        # Section 2, equation 4 and near explation for alpha, alpha hat, beta.
+        self.beta = self.linear_noise_schedule()
+        self.alpha = 1 - self.beta
+        self.alpha_hat = torch.cumprod(self.alpha, dim=0)
+
+        # Section 3.2, algorithm 1 formula implementation. Generate values early reuse later.
+        self.sqrt_alpha_hat = torch.sqrt(self.alpha_hat)
+        self.sqrt_one_minus_alpha_hat = torch.sqrt(1 - self.alpha_hat)
+
+        # Section 3.2, equation 2 precalculation values.
+        self.sqrt_alpha = torch.sqrt(self.alpha)
+        self.std_beta = torch.sqrt(self.beta)
+
+        # Clean up unnecessary values.
+        del self.alpha
+        del self.alpha_hat
+
+    def linear_noise_schedule(self) -> torch.Tensor:
+        """Same amount of noise is applied each step. Weakness is near end steps image is so noisy it is hard make
+        out information. So noise removal is also very small amount, so it takes more steps to generate clear image.
+        """
+        return torch.linspace(start=self.beta_start, end=self.beta_end, steps=self.noise_steps, device=self.device)
+
+    def q_sample(self, x: torch.Tensor, t: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Section 3.2, algorithm 1 formula implementation. Forward process, defined by `q`.
+
+        Found in section 2. `q` gradually adds gaussian noise according to variance schedule. Also,
+        can be seen on figure 2.
+        """
+        sqrt_alpha_hat = self.sqrt_alpha_hat[t].view(-1, 1, 1, 1)
+        sqrt_one_minus_alpha_hat = self.sqrt_one_minus_alpha_hat[t].view(-1, 1, 1, 1)
+        epsilon = torch.randn_like(x, device=self.device)
+        return sqrt_alpha_hat * x + sqrt_one_minus_alpha_hat * epsilon, epsilon
+
+    def sample_timesteps(self, batch_size: int) -> torch.Tensor:
+        """Random timestep for each sample in a batch. Timesteps selected from [1, noise_steps].
+        """
+        return torch.randint(low=1, high=self.noise_steps, size=(batch_size,), device=self.device)
+
+    def p_sample(
+            self,
+            eps_model: nn.Module,
+            n: int,
+            scale_factor: int = 2,
+            conditional_embedding: torch.Tensor = None,
+            contextual_text_embedding: torch.Tensor = None,
+            contextual_text_mask_embedding: torch.Tensor = None,
+    ) -> torch.Tensor:
+        """Implementation of algorithm 2 sampling. Reverse process, defined by `p` in section 2. Short
+         formula is defined in equation 11 of section 3.2.
+
+        From noise generates image step by step. From noise_steps, (noise_steps - 1), ...., 2, 1.
+        Here, alpha = 1 - beta. So, beta = 1 - alpha.
+
+        Sample noise from normal distribution of timestep t > 1, else noise is 0. Before returning values
+        are clamped to [-1, 1] and converted to pixel values [0, 255].
+
+        Args:
+            contextual_text_mask_embedding:
+            contextual_text_embedding:
+            conditional_embedding: Pooled embedding (same shape per string) generated by language model.
+            scale_factor: Scales the output image by the factor.
+            eps_model: Noise prediction model. `eps_theta(x_t, t)` in paper. Theta is the model parameters.
+            n: Number of samples to process.
+
+        Returns:
+            Generated denoised image.
+        """
+        print(f'Sampling {n} images....')
+
+        eps_model.eval()
+        with torch.no_grad():
+            x = torch.randn((n, 3, self.img_size, self.img_size), device=self.device)
+
+            for i in tqdm(reversed(range(1, self.noise_steps)), position=0):
+                t = torch.ones(n, dtype=torch.long, device=self.device) * i
+
+                sqrt_alpha_t = self.sqrt_alpha[t].view(-1, 1, 1, 1)
+                beta_t = self.beta[t].view(-1, 1, 1, 1)
+                sqrt_one_minus_alpha_hat_t = self.sqrt_one_minus_alpha_hat[t].view(-1, 1, 1, 1)
+                epsilon_t = self.std_beta[t].view(-1, 1, 1, 1)
+
+                random_noise = torch.randn_like(x) if i > 1 else torch.zeros_like(x)
+
+                x = ((1 / sqrt_alpha_t) *
+                     (x - ((beta_t / sqrt_one_minus_alpha_hat_t) *
+                           eps_model(
+                               x=x,
+                               timestep=t,
+                               conditional_embedding=conditional_embedding,
+                               contextual_text_embedding=contextual_text_embedding,
+                               contextual_text_mask_embedding=contextual_text_mask_embedding,
+
+                           )))
+                     ) + (epsilon_t * random_noise)
+
+        eps_model.train()
+
+        x = ((x.clamp(-1, 1) + 1) * 127.5).type(torch.uint8)
+        x = F.interpolate(input=x, scale_factor=scale_factor, mode='nearest-exact')
+        return x
+
+
 class EfficientUNet(nn.Module):
     def __init__(
             self,
             in_channels: int = 3,
-            cond_embed_dim: int = 512,
+            cond_embed_dim: int = 768,
             base_channel_dim: int = 32,
             num_resnet_blocks: Union[Tuple[int, ...], int] = None,
             channel_mults: Tuple[int, ...] = None,
@@ -260,6 +421,7 @@ class EfficientUNet(nn.Module):
             use_text_conditioning: Tuple[bool, ...] = False,
             use_attention: Tuple[bool, ...] = True,
             attn_resolution: Tuple[int, ...] = 32,
+            noise_steps: int = 1000,
     ):
         """UNet implementation for 64 x 64 image as defined in Section F.1 and efficient UNet architecture for
          64 -> 256 upsampling as shown in Figure A.30.
@@ -345,9 +507,12 @@ class EfficientUNet(nn.Module):
             in_channels=channel_mults[0] * base_channel_dim, out_channels=3, kernel_size=(3, 3), padding=(1, 1)
         )
 
+        self.pos_encoding = PositionalEncoding(embedding_dim=cond_embed_dim, max_len=noise_steps)
+
     def forward(
             self,
             x: torch.Tensor,
+            timestep: torch.LongTensor,
             conditional_embedding: torch.Tensor,
             contextual_text_embedding: torch.Tensor = None,
             contextual_text_mask_embedding: torch.Tensor = None,
@@ -357,6 +522,9 @@ class EfficientUNet(nn.Module):
         As shown in Figure A.30 the last unet dblock and first unet block in the middle do not have skip connection.
         """
         x = self.initial_conv(x)
+
+        timestep = self.pos_encoding(timestep)
+        conditional_embedding += timestep
 
         x_skip_outputs = []
         for dblock in self.dblocks:
