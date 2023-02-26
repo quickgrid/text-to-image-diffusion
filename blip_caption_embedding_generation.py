@@ -45,7 +45,7 @@ def generate_caption(args: argparse.Namespace) -> None:
     pathlib.Path(caption_token_embed_dest_path).mkdir(parents=True, exist_ok=True)
     pathlib.Path(caption_token_mask_embed_dest_path).mkdir(parents=True, exist_ok=True)
 
-    if args.embed_cap:
+    if args.embed_cap or args.cap_path:
         st_text_embed_tokenizer = AutoTokenizer.from_pretrained("sentence-transformers/all-mpnet-base-v2")
         st_text_embed_model = AutoModel.from_pretrained("sentence-transformers/all-mpnet-base-v2")
 
@@ -67,6 +67,52 @@ def generate_caption(args: argparse.Namespace) -> None:
     ext_check = (".jpg", ".jpeg", ".png")
     if args.ext:
         ext_check += (".jfif", ".webp", ".bmp")
+
+    if args.cap_path is not None:
+        for root, dirs, files in os.walk(args.cap_path):
+            for file in tqdm(files):
+                if file.endswith(".txt"):
+                    with open(os.path.join(root, file), 'r') as f:
+                        caption_list = [line.rstrip() for line in f]
+
+                        encoded_input = st_text_embed_tokenizer(
+                            caption_list,
+                            padding=True,
+                            truncation=True,
+                            max_length=128,
+                            return_tensors='pt'
+                        )
+
+                        # Compute token embeddings
+                        with torch.no_grad():
+                            caption_token_embeddings = st_text_embed_model(**encoded_input)
+
+                        if args.embed_cap_token:
+                            np.save(os.path.join(
+                                caption_token_embed_dest_path,
+                                f'token_{os.path.splitext(file)[0]}.npy'),
+                                caption_token_embeddings.last_hidden_state
+                            )
+
+                            np.save(os.path.join(
+                                caption_token_mask_embed_dest_path,
+                                f'mask_{os.path.splitext(file)[0]}.npy'),
+                                encoded_input['attention_mask']
+                            )
+
+                        if args.mean_pool:
+                            caption_embeddings = mean_pooling(caption_token_embeddings, encoded_input['attention_mask'])
+                            caption_embeddings = F.normalize(caption_embeddings, p=2, dim=1)
+                        else:
+                            caption_embeddings = caption_token_embeddings.pooler_output
+
+                        np.save(os.path.join(
+                            caption_embed_dest_path,
+                            f'pooled_embed_{os.path.splitext(file)[0]}.npy'),
+                            caption_embeddings
+                        )
+
+        return
 
     for root, dirs, files in os.walk(args.src):
         for file in tqdm(files):
@@ -147,6 +193,7 @@ def main() -> None:
     parser.add_argument('--cap', help="number of captions using neucleus sampling", default=1, type=int)
     parser.add_argument('--beam', help="generates single caption without sampling", action='store_true')
     parser.add_argument('--ext', help="extended mode supporting more image types", action='store_true')
+    parser.add_argument('--cap_path', help="path to pre-generated captions for creating embeddings", type=pathlib.Path)
     parser.add_argument(
         '--embed_cap',
         help="use a sentence transformer model to generate embeddings from full caption text",
