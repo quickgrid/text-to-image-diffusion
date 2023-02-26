@@ -449,7 +449,7 @@ class UNetConditional(nn.Module):
         self.sa6 = TransformerEncoderSA(64, 64)
         self.out_conv = nn.Conv2d(in_channels=64, out_channels=out_channels, kernel_size=(1, 1))
 
-        self.time_projection = nn.Conv2d(in_channels=1024, out_channels=time_dim, padding=(1, 1), kernel_size=(3, 3))
+        self.time_projection = nn.Linear(in_features=768, out_features=time_dim)
 
     def forward(self, x: torch.Tensor, t: torch.LongTensor, c: torch.Tensor = None) -> torch.Tensor:
         """Forward pass with image tensor and timestep reduce noise.
@@ -462,12 +462,9 @@ class UNetConditional(nn.Module):
         t = self.pos_encoding(t)
 
         if c is not None:
-            c = torch.unsqueeze(c, dim=2)
-            c = c.permute(0, 3, 1, 2)
-            t = t.view(-1, self.time_dim, 1, 1)
-            t = torch.cat([t, c], dim=1)
-            t = self.time_projection(t)
-            t = t.view(-1, self.time_dim)
+            c = c.squeeze(dim=1)
+            c = self.time_projection(c)
+            t += c
 
         x1 = self.input_conv(x)
         x2 = self.down1(x1, t)
@@ -874,7 +871,7 @@ class Trainer:
                             epoch=epoch,
                             batch_idx=batch_idx,
                             sample_count=self.sample_count,
-                            sentence_embedding=sentence_embedding[0].unsqueeze(dim=1)
+                            sentence_embedding=sentence_embedding[0]
                         )
 
                         Utils.save_checkpoint(
@@ -944,13 +941,14 @@ if __name__ == '__main__':
 
     # sentence_embedding = torch.from_numpy(
     #     np.load(r'PATH_TO_GENERATED_CAPTION_EMBEDDINGS\sentence_003767.npy')
-    # ).unsqueeze(dim=1).to('cuda')
+    # ).to('cuda')
     # trainer.sample(output_name='output5', sample_count=1, sentence_embedding=sentence_embedding)
 
-    # sentence_embedding = generate_sentence_embedding(
-    #     input_caption="a man is wearing glasses, smiling, he has black hair"
-    # ).unsqueeze(dim=1).to('cuda')
-    # trainer.sample(output_name='output5', sample_count=1, sentence_embedding=sentence_embedding)
+    sentence_embedding = generate_sentence_embedding(
+        # input_caption="a duck flying towards a ship"
+        input_caption="a man is wearing glasses, smiling, he has black hair"
+    ).to('cuda')
+    trainer.sample(output_name='output5', sample_count=1, sentence_embedding=sentence_embedding)
 
     # trainer.sample_gif(
     #     output_name='output8',
