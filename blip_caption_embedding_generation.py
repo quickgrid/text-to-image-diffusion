@@ -39,9 +39,11 @@ def generate_caption(args: argparse.Namespace) -> None:
     caption_dest_path = f'{args.dest}/caption'
     caption_embed_dest_path = f'{args.dest}/caption_embed'
     caption_token_embed_dest_path = f'{args.dest}/caption_token_embed'
+    caption_token_mask_embed_dest_path = f'{args.dest}/caption_token_mask_embed'
     pathlib.Path(caption_dest_path).mkdir(parents=True, exist_ok=True)
     pathlib.Path(caption_embed_dest_path).mkdir(parents=True, exist_ok=True)
     pathlib.Path(caption_token_embed_dest_path).mkdir(parents=True, exist_ok=True)
+    pathlib.Path(caption_token_mask_embed_dest_path).mkdir(parents=True, exist_ok=True)
 
     if args.embed_cap:
         st_text_embed_tokenizer = AutoTokenizer.from_pretrained("sentence-transformers/all-mpnet-base-v2")
@@ -107,7 +109,13 @@ def generate_caption(args: argparse.Namespace) -> None:
                         np.save(os.path.join(
                             caption_token_embed_dest_path,
                             f'token_{os.path.splitext(file)[0]}.npy'),
-                            caption_token_embeddings
+                            caption_token_embeddings.last_hidden_state
+                        )
+
+                        np.save(os.path.join(
+                            caption_token_mask_embed_dest_path,
+                            f'mask_{os.path.splitext(file)[0]}.npy'),
+                            encoded_input['attention_mask']
                         )
 
                     if args.mean_pool:
@@ -118,7 +126,7 @@ def generate_caption(args: argparse.Namespace) -> None:
 
                     np.save(os.path.join(
                         caption_embed_dest_path,
-                        f'sentence_{os.path.splitext(file)[0]}.npy'),
+                        f'pooled_embed_{os.path.splitext(file)[0]}.npy'),
                         caption_embeddings
                     )
 
@@ -136,7 +144,7 @@ def main() -> None:
     parser.add_argument('--img_size', metavar='--img-size', help="image size for processing", default=384, type=int)
     parser.add_argument('--max_len', metavar='--max-len', help="max output length", default=48, type=int)
     parser.add_argument('--min_len', metavar='--min-len', help="min output length", default=16, type=int)
-    parser.add_argument('--cap', help="number of captions using neucleus sampling", default=3, type=int)
+    parser.add_argument('--cap', help="number of captions using neucleus sampling", default=1, type=int)
     parser.add_argument('--beam', help="generates single caption without sampling", action='store_true')
     parser.add_argument('--ext', help="extended mode supporting more image types", action='store_true')
     parser.add_argument(
