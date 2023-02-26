@@ -6,7 +6,6 @@ References:
     - Self Attention paper, https://arxiv.org/abs/1706.03762.
     - Vision Transformers paper, https://arxiv.org/pdf/2010.11929.pdf.
 """
-import math
 from typing import Tuple, Union
 
 import numpy as np
@@ -60,6 +59,7 @@ class EfficientUNetDBlock(nn.Module):
             contextual_text_embed_dim: int = None,
             stride: Tuple[int, int] = None,
             use_text_conditioning: bool = False,
+            attn_resolution: int = 32,
     ):
         """Implementation of Efficient UNet DBlock as shown in Figure A.28. If stide is provided downsamples
         input tensor by the amount.
@@ -106,7 +106,7 @@ class EfficientUNetDBlock(nn.Module):
 
         self.mem_efficient_attn = Attention(
             dim=out_channels,
-            dim_head=64,  # dimension per head
+            dim_head=attn_resolution,  # dimension per head
             heads=8,  # number of attention heads
             causal=True,  # autoregressive or not
             memory_efficient=True,
@@ -148,7 +148,9 @@ class EfficientUNetDBlock(nn.Module):
         """
         x = self.initial_conv(x) if self.use_conv else x
         cond_embed = self.conditional_embedding_layer(conditional_embedding)
-        cond_embed = cond_embed.view(cond_embed.shape[0], cond_embed.shape[1], 1, 1).repeat(1, 1, x.shape[2], x.shape[3])
+        cond_embed = cond_embed.view(
+            cond_embed.shape[0], cond_embed.shape[1], 1, 1
+        ).repeat(1, 1, x.shape[2], x.shape[3])
         x = x + cond_embed
         x = self.resnet_blocks(x)
 
@@ -171,6 +173,7 @@ class EfficientUNetUBlock(nn.Module):
             num_resnet_blocks: int,
             stride: Tuple[int, int] = None,
             use_attention: bool = False,
+            attn_resolution: int = 32,
     ):
         """Implementation of Efficient UNet UBlock as shown in Figure A.29.
 
@@ -198,7 +201,7 @@ class EfficientUNetUBlock(nn.Module):
         if use_attention:
             self.mem_efficient_attn = Attention(
                 dim=out_channels,
-                dim_head=64,  # dimension per head
+                dim_head=attn_resolution,  # dimension per head
                 heads=8,  # number of attention heads
                 causal=True,  # autoregressive or not
                 memory_efficient=True,
@@ -226,7 +229,9 @@ class EfficientUNetUBlock(nn.Module):
             conditional_embedding: Time, class, pooled Text embeddings.
         """
         cond_embed = self.conditional_embedding_layer(conditional_embedding)
-        cond_embed = cond_embed.view(cond_embed.shape[0], cond_embed.shape[1], 1, 1).repeat(1, 1, x.shape[2], x.shape[3])
+        cond_embed = cond_embed.view(
+            cond_embed.shape[0], cond_embed.shape[1], 1, 1
+        ).repeat(1, 1, x.shape[2], x.shape[3])
         x = self.input_embedding_layer(x)
         x = x + cond_embed
         x = self.resnet_blocks(x)
@@ -249,11 +254,12 @@ class EfficientUNet(nn.Module):
             in_channels: int = 3,
             cond_embed_dim: int = 512,
             base_channel_dim: int = 32,
-            use_attention: bool = True,
             num_resnet_blocks: Union[Tuple[int, ...], int] = None,
             channel_mults: Tuple[int, ...] = None,
             contextual_text_embed_dim: int = None,
-            use_text_conditioning: bool = False,
+            use_text_conditioning: Tuple[bool, ...] = False,
+            use_attention: Tuple[bool, ...] = True,
+            attn_resolution: Tuple[int, ...] = 32,
     ):
         """UNet implementation for 64 x 64 image as defined in Section F.1 and efficient UNet architecture for
          64 -> 256 upsampling as shown in Figure A.30.
@@ -305,7 +311,8 @@ class EfficientUNet(nn.Module):
                     num_resnet_blocks=num_resnet_blocks[idx],
                     stride=(2, 2),
                     contextual_text_embed_dim=contextual_text_embed_dim,
-                    use_text_conditioning=use_text_conditioning,
+                    use_text_conditioning=use_text_conditioning[idx],
+                    attn_resolution=attn_resolution[idx]
                 )
             )
 
@@ -317,7 +324,8 @@ class EfficientUNet(nn.Module):
                 cond_embed_dim=cond_embed_dim,
                 num_resnet_blocks=num_resnet_blocks_reversed[1],
                 stride=(2, 2),
-                use_attention=use_attention,
+                use_attention=use_attention[0],
+                attn_resolution=attn_resolution[0],
             )
         )
         for idx in range(1, mutliplied_channels_len - 1, 1):
@@ -328,7 +336,8 @@ class EfficientUNet(nn.Module):
                     cond_embed_dim=cond_embed_dim,
                     num_resnet_blocks=num_resnet_blocks_reversed[idx],
                     stride=(2, 2),
-                    use_attention=use_attention,
+                    use_attention=use_attention[idx],
+                    attn_resolution=attn_resolution[idx]
                 )
             )
 
