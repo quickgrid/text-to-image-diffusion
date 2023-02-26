@@ -107,6 +107,7 @@ class TestImagen:
 
     def test_efficient_unet(self):
         # x: Tensor, shape[seq_len, batch_size, embedding_dim]
+        noise_steps = 500
         embedding_dim = 768
         num_channels = 3
         hw = 256
@@ -116,6 +117,8 @@ class TestImagen:
         cond_embedding = torch.randn((b, embedding_dim), device=self.device)
         context_embedding = torch.randn((b, 13, embedding_dim), device=self.device)
         context_mask_embedding = torch.ones((b, 13), dtype=torch.bool, device=self.device)
+
+        timestep = torch.randint(low=1, high=noise_steps, size=(b,), device=self.device)
 
         t_enc = EfficientUNet(
             in_channels=num_channels,
@@ -128,7 +131,14 @@ class TestImagen:
             use_attention=(False, True, True),
             attn_resolution=(32, 16, 8),
         ).to(self.device)
-        out = t_enc(x, cond_embedding, context_embedding, context_mask_embedding)
+
+        out = t_enc(
+            x=x,
+            timestep=timestep,
+            conditional_embedding=cond_embedding,
+            contextual_text_embedding=context_embedding,
+            contextual_text_mask_embedding=context_mask_embedding,
+        )
         print(f'out: {out.shape}')
 
 
