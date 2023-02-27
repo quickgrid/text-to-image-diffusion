@@ -6,12 +6,15 @@ References:
     - Self Attention paper, https://arxiv.org/abs/1706.03762.
     - Vision Transformers paper, https://arxiv.org/pdf/2010.11929.pdf.
 """
+import copy
 import os
 import math
+import pathlib
 from typing import Tuple, Union
 import logging
 
 import numpy as np
+from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 from PIL import Image
 import torch
@@ -674,3 +677,134 @@ class Utils:
         if 'grad_scaler' in checkpoint:
             grad_scaler.load_state_dict(checkpoint['grad_scaler'])
         return checkpoint['epoch']
+
+
+class EMA:
+    def __init__(self, beta):
+        """Modifies exponential moving average model.
+        """
+        self.beta = beta
+        self.step = 0
+
+    def update_model_average(self, ema_model: nn.Module, current_model: nn.Module) -> None:
+        for current_params, ema_params in zip(current_model.parameters(), ema_model.parameters()):
+            old_weights, new_weights = ema_params.data, current_params.data
+            ema_params.data = self.update_average(old_weights=old_weights, new_weights=new_weights)
+
+    def update_average(self, old_weights: torch.Tensor, new_weights: torch.Tensor) -> torch.Tensor:
+        if old_weights is None:
+            return new_weights
+        return old_weights * self.beta + (1 - self.beta) * new_weights
+
+    def ema_step(self, ema_model: nn.Module, model: nn.Module, step_start_ema: int = 2000) -> None:
+        if self.step < step_start_ema:
+            self.reset_parameters(ema_model=ema_model, model=model)
+            self.step += 1
+            return
+        self.update_model_average(ema_model=ema_model, current_model=model)
+        self.step += 1
+
+    @staticmethod
+    def reset_parameters(ema_model: nn.Module, model: nn.Module) -> None:
+        ema_model.load_state_dict(model.state_dict())
+
+
+class Trainer:
+    def __init__(
+            self,
+            dataset_path: str,
+            pooled_text_embedding_path: str,
+            token_text_embedding_path: str,
+            token_mask_embedding_path: str,
+            save_path: str = None,
+            checkpoint_path: str = None,
+            checkpoint_path_ema: str = None,
+            run_name: str = 'imagen',
+            image_size: int = 64,
+            image_channels: int = 3,
+            accumulation_batch_size: int = 4,
+            accumulation_iters: int = 16,
+            sample_count: int = 1,
+            num_workers: int = 0,
+            device: str = 'cuda',
+            num_epochs: int = 100000,
+            fp16: bool = False,
+            save_every: int = 2000,
+            learning_rate: float = 1e-3,
+            noise_steps: int = 500,
+    ):
+        self.num_epochs = num_epochs
+        self.device = device
+        self.fp16 = fp16
+        self.save_every = save_every
+        self.accumulation_iters = accumulation_iters
+        self.sample_count = sample_count
+
+        base_path = save_path if save_path is not None else os.getcwd()
+        self.save_path = os.path.join(base_path, run_name)
+        pathlib.Path(self.save_path).mkdir(parents=True, exist_ok=True)
+        self.logger = SummaryWriter(log_dir=os.path.join(self.save_path, 'logs'))
+
+        diffusion_dataset = CustomImageTextDataset(
+            image_dir=dataset_path,
+            image_size=image_size,
+            pooled_embedding_dir=pooled_text_embedding_path,
+            token_embedding_dir=token_text_embedding_path,
+            token_mask_dir=token_mask_embedding_path,
+        )
+
+        self.train_loader = DataLoader(
+            diffusion_dataset,
+            batch_size=accumulation_batch_size,
+            shuffle=True,
+            pin_memory=True,
+            num_workers=num_workers,
+            drop_last=False,
+            collate_fn=Utils.collate_fn,
+        )
+
+        self.unet_model = EfficientUNet().to(device)
+        self.diffusion = Diffusion(img_size=image_size, device=self.device, noise_steps=noise_steps)
+        self.optimizer = optim.Adam(
+            params=self.unet_model.parameters(), lr=learning_rate, betas=(0.9, 0.999)
+        )
+        self.scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer=self.optimizer, T_max=300)
+        # self.loss_fn = nn.MSELoss().to(self.device)
+        self.grad_scaler = GradScaler()
+
+        self.ema = EMA(beta=0.95)
+        self.ema_model = copy.deepcopy(self.unet_model).eval().requires_grad_(False)
+
+        self.start_epoch = 0
+        if checkpoint_path:
+            logging.info(f'Loading model weights...')
+            self.start_epoch = Utils.load_checkpoint(
+                model=self.unet_model,
+                optimizer=self.optimizer,
+                scheduler=self.scheduler,
+                grad_scaler=self.grad_scaler,
+                filename=checkpoint_path,
+            )
+        if checkpoint_path_ema:
+            logging.info(f'Loading EMA model weights...')
+            _ = Utils.load_checkpoint(
+                model=self.ema_model,
+                filename=checkpoint_path_ema,
+            )
+
+    def train(self) -> None:
+        pass
+
+
+if __name__ == '__main__':
+    trainer = Trainer(
+        dataset_path=r'',
+        pooled_text_embedding_path=r'',
+        token_text_embedding_path=r'',
+        token_mask_embedding_path=r'',
+        save_path=r'',
+        checkpoint_path=r'',
+        checkpoint_path_ema=r'',
+    )
+    trainer.train()
+
