@@ -6,16 +6,26 @@ References:
     - Self Attention paper, https://arxiv.org/abs/1706.03762.
     - Vision Transformers paper, https://arxiv.org/pdf/2010.11929.pdf.
 """
+import os
 import math
 from typing import Tuple, Union
+import logging
 
 import numpy as np
-import torch
-from torch import nn
-from torch.functional import F
 from tqdm import tqdm
+from PIL import Image
+import torch
+import torchvision
+from torch import nn
+from torch import optim
+from torch.functional import F
+from torch.cuda.amp import GradScaler
+from torch.utils.data import Dataset, DataLoader
+from torchvision.transforms import transforms
 
 from memory_efficient_attention import Attention
+
+logging.basicConfig(format="%(asctime)s - %(levelname)s: %(message)s", level=logging.INFO, datefmt="%I:%M:%S")
 
 
 class EfficientUNetResNetBlock(nn.Module):
@@ -540,3 +550,127 @@ class EfficientUNet(nn.Module):
 
         x = self.image_projection(x)
         return x
+
+
+class CustomImageTextDataset(Dataset):
+    def __init__(
+            self,
+            image_dir: str,
+            pooled_embedding_dir: str,
+            token_embedding_dir: str,
+            token_mask_dir: str,
+            image_size: int,
+    ) -> None:
+        self.image_dir = image_dir
+        self.pooled_embedding_dir = pooled_embedding_dir
+        self.token_embedding_dir = token_embedding_dir
+        self.token_mask_dir = token_mask_dir
+
+        self.image_name_list = os.listdir(image_dir)
+        self.pooled_embedding_name_list = os.listdir(pooled_embedding_dir)
+        self.token_embedding_name_list = os.listdir(token_embedding_dir)
+        self.token_mask_name_list = os.listdir(token_mask_dir)
+
+        print(len(self.image_name_list), len(self.pooled_embedding_name_list))
+
+        assert len(self.image_name_list) == len(self.pooled_embedding_name_list), \
+            'Images and pooled text embedding count should be same.'
+        assert len(self.image_name_list) == len(self.token_embedding_name_list), \
+            'Images and text token embedding count should be same.'
+        assert len(self.image_name_list) == len(self.token_mask_name_list), \
+            'Number of images and token masks count should be same.'
+
+        self.image_transform = transforms.Compose([
+            transforms.Resize((image_size, image_size)),
+            transforms.ToTensor(),
+            transforms.Normalize(
+                # mean=(0.48145466, 0.4578275, 0.40821073),   # BLIP caption generator transfrom values.
+                # std=(0.26862954, 0.26130258, 0.27577711),   # Same as above.
+                mean=(0.5, 0.5, 0.5),  # BLIP caption generator transfrom values.
+                std=(0.5, 0.5, 0.5),  # Same as above.
+            )
+        ])
+
+    def __len__(self) -> int:
+        return len(self.image_name_list)
+
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, ...]:
+        file_name, file_ext = os.path.splitext(self.image_name_list[idx])
+
+        image = Image.open(os.path.join(self.image_dir, self.image_name_list[idx]))
+        pooled_embedding = np.load(os.path.join(self.pooled_embedding_dir, f'pooled_embed_{file_name}.npy'))
+        token_embedding = np.load(os.path.join(self.token_embedding_dir, f'token_{file_name}.npy'))
+        token_mask = np.load(os.path.join(self.token_mask_dir, f'mask_{file_name}.npy'))
+
+        image = self.image_transform(image)
+        pooled_embedding = torch.from_numpy(pooled_embedding)
+        token_embedding = torch.from_numpy(token_embedding)
+        token_mask = torch.from_numpy(token_mask)
+
+        return (
+            image,
+            pooled_embedding,
+            token_embedding,
+            token_mask
+        )
+
+
+class Utils:
+    def __init__(self):
+        super(Utils, self).__init__()
+
+    @staticmethod
+    def collate_fn(batch):
+        """Discard none samples.
+        """
+        batch = list(filter(lambda x: x is not None, batch))
+        return torch.utils.data.dataloader.default_collate(batch)
+
+    @staticmethod
+    def save_images(images: torch.Tensor, save_path: str) -> None:
+        grid = torchvision.utils.make_grid(images)
+        img_arr = grid.permute(1, 2, 0).cpu().numpy()
+        img = Image.fromarray(img_arr)
+        img.save(save_path)
+
+    @staticmethod
+    def save_checkpoint(
+            epoch: int,
+            model: nn.Module,
+            filename: str,
+            optimizer: optim.Optimizer = None,
+            scheduler: optim.lr_scheduler = None,
+            grad_scaler: GradScaler = None,
+    ) -> None:
+        checkpoint = {
+            'epoch': epoch,
+            'state_dict': model.state_dict(),
+        }
+        if optimizer:
+            checkpoint['optimizer'] = optimizer.state_dict()
+        if scheduler:
+            checkpoint['scheduler'] = scheduler.state_dict()
+        if scheduler:
+            checkpoint['grad_scaler'] = grad_scaler.state_dict()
+
+        torch.save(checkpoint, filename)
+        logging.info("=> Saving checkpoint complete.")
+
+    @staticmethod
+    def load_checkpoint(
+            model: nn.Module,
+            filename: str,
+            optimizer: optim.Optimizer = None,
+            scheduler: optim.lr_scheduler = None,
+            grad_scaler: GradScaler = None,
+    ) -> int:
+        logging.info("=> Loading checkpoint")
+        checkpoint = torch.load(filename, map_location="cuda")
+        model.load_state_dict(checkpoint['state_dict'], strict=False)
+        if 'optimizer' in checkpoint:
+            optimizer.load_state_dict(checkpoint['optimizer'])
+        if 'scheduler' in checkpoint:
+            scheduler.load_state_dict(checkpoint['scheduler'])
+        if 'grad_scaler' in checkpoint:
+            grad_scaler.load_state_dict(checkpoint['grad_scaler'])
+        return checkpoint['epoch']
