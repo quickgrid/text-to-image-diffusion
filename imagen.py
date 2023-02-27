@@ -41,6 +41,7 @@ class EfficientUNetResNetBlock(nn.Module):
             in_channels: int,
             out_channels: int,
             num_groups: int = 8,
+            residual: bool = False,
     ):
         """Efficient UNet implementation from Figure A.27.
 
@@ -52,6 +53,7 @@ class EfficientUNetResNetBlock(nn.Module):
         """
         super(EfficientUNetResNetBlock, self).__init__()
 
+        self.residual = residual
         self.main_path = nn.Sequential(
             nn.GroupNorm(num_groups=num_groups, num_channels=in_channels),
             nn.SiLU(),
@@ -66,7 +68,10 @@ class EfficientUNetResNetBlock(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.main_path(x) + self.skip_path(x)
+        if self.residual:
+            return F.gelu(self.main_path(x) + self.skip_path(x))
+        
+        return self.main_path(x)
 
 
 class EfficientUNetDBlock(nn.Module):
@@ -110,22 +115,25 @@ class EfficientUNetDBlock(nn.Module):
         )
 
         self.conditional_embedding_layer = nn.Sequential(
-            nn.Linear(in_features=cond_embed_dim, out_features=out_channels),
+            nn.LayerNorm(cond_embed_dim),
             nn.SiLU(),
-            nn.Linear(in_features=out_channels, out_features=out_channels),
+            nn.Linear(in_features=cond_embed_dim, out_features=out_channels),
         )
 
         self.resnet_blocks = nn.Sequential()
         for _ in range(num_resnet_blocks):
             self.resnet_blocks.append(
-                EfficientUNetResNetBlock(in_channels=out_channels, out_channels=out_channels)
+                EfficientUNetResNetBlock(in_channels=out_channels, out_channels=out_channels, residual=True),
+            )
+            self.resnet_blocks.append(
+                EfficientUNetResNetBlock(in_channels=out_channels, out_channels=out_channels),
             )
 
         if use_text_conditioning:
             self.contextual_text_embedding_layer = nn.Sequential(
-                nn.Linear(in_features=contextual_text_embed_dim, out_features=out_channels),
+                nn.LayerNorm(contextual_text_embed_dim),
                 nn.SiLU(),
-                nn.Linear(in_features=out_channels, out_features=out_channels),
+                nn.Linear(in_features=contextual_text_embed_dim, out_features=out_channels),
             )
 
         self.mem_efficient_attn = Attention(
@@ -209,9 +217,9 @@ class EfficientUNetUBlock(nn.Module):
         self.use_conv = True if stride is not None else False
 
         self.conditional_embedding_layer = nn.Sequential(
-            nn.Linear(in_features=cond_embed_dim, out_features=out_channels),
+            nn.LayerNorm(cond_embed_dim),
             nn.SiLU(),
-            nn.Linear(in_features=out_channels, out_features=out_channels),
+            nn.Linear(in_features=cond_embed_dim, out_features=out_channels),
         )
 
         self.input_embedding_layer = nn.Conv2d(
@@ -220,6 +228,9 @@ class EfficientUNetUBlock(nn.Module):
 
         self.resnet_blocks = nn.Sequential()
         for _ in range(num_resnet_blocks):
+            self.resnet_blocks.append(
+                EfficientUNetResNetBlock(in_channels=out_channels, out_channels=out_channels, residual=True),
+            )
             self.resnet_blocks.append(
                 EfficientUNetResNetBlock(in_channels=out_channels, out_channels=out_channels)
             )
@@ -269,7 +280,7 @@ class EfficientUNetUBlock(nn.Module):
             x = x.permute(0, 2, 1).view(b, c, h, w)
 
         if self.use_conv:
-            x = self.last_conv_upsampler(x)
+            return self.last_conv_upsampler(x)
 
         return x
 
@@ -467,7 +478,7 @@ class EfficientUNet(nn.Module):
         if channel_mults is None:
             channel_mults = (1, 2, 3, 4)
         if num_resnet_blocks is None:
-            num_resnet_blocks = 3
+            num_resnet_blocks = 4
 
         if isinstance(num_resnet_blocks, int):
             num_resnet_blocks = (num_resnet_blocks,) * len(channel_mults)
@@ -545,6 +556,7 @@ class EfficientUNet(nn.Module):
         As shown in Figure A.30 the last unet dblock and first unet block in the middle do not have skip connection.
         """
         x = self.initial_conv(x)
+
         conditional_embedding += self.pos_encoding(timestep)
 
         x_skip_outputs = []
@@ -730,7 +742,7 @@ class Trainer:
             run_name: str = 'imagen',
             image_size: int = 64,
             image_channels: int = 3,
-            accumulation_batch_size: int = 28,
+            accumulation_batch_size: int = 16,
             accumulation_iters: int = 2,
             sample_count: int = 1,
             num_workers: int = 0,
