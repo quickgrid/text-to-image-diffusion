@@ -48,6 +48,10 @@ def generate_caption(args: argparse.Namespace) -> None:
     pathlib.Path(caption_token_embed_dest_path).mkdir(parents=True, exist_ok=True)
     pathlib.Path(caption_token_mask_embed_dest_path).mkdir(parents=True, exist_ok=True)
 
+    padding_type = True
+    if args.pad_max_size:
+        padding_type = 'max_length'
+
     if args.embed_cap or args.cap_path:
         st_text_embed_tokenizer = AutoTokenizer.from_pretrained("sentence-transformers/all-mpnet-base-v2")
         st_text_embed_model = AutoModel.from_pretrained("sentence-transformers/all-mpnet-base-v2")
@@ -80,7 +84,7 @@ def generate_caption(args: argparse.Namespace) -> None:
 
                         encoded_input = st_text_embed_tokenizer(
                             caption_list,
-                            padding='max_length',
+                            padding=padding_type,
                             truncation=True,
                             max_length=TOKENIZER_MAX_LENGTH,
                             return_tensors='pt'
@@ -144,7 +148,7 @@ def generate_caption(args: argparse.Namespace) -> None:
                 if args.embed_cap:
                     encoded_input = st_text_embed_tokenizer(
                         caption_list,
-                        padding='max_length',
+                        padding=padding_type,
                         truncation=True,
                         max_length=TOKENIZER_MAX_LENGTH,
                         return_tensors='pt'
@@ -211,6 +215,9 @@ def main() -> None:
         '--mean_pool',
         help='uses custom mean pooling for single embedding per sentence otherwise uses models own pool output',
         action='store_true'
+    )
+    parser.add_argument(
+        '--pad_max_size', help='use fixed token embedding pad size', action='store_true'
     )
     args = parser.parse_args()
     generate_caption(args)
