@@ -7,24 +7,24 @@ References:
     - Vision Transformers paper, https://arxiv.org/pdf/2010.11929.pdf.
 """
 import copy
-import os
+import logging
 import math
+import os
 import pathlib
 from typing import Tuple, Union
-import logging
 
 import numpy as np
-from torch.utils.tensorboard import SummaryWriter
-from tqdm import tqdm
-from PIL import Image
 import torch
 import torchvision
+from PIL import Image
 from torch import nn
 from torch import optim
-from torch.functional import F
 from torch.cuda.amp import GradScaler
+from torch.functional import F
 from torch.utils.data import Dataset, DataLoader
+from torch.utils.tensorboard import SummaryWriter
 from torchvision.transforms import transforms
+from tqdm import tqdm
 
 from memory_efficient_attention import Attention
 
@@ -836,7 +836,77 @@ class Trainer:
         )
 
     def train(self) -> None:
-        pass
+        logging.info(f'Training started....')
+        for epoch in range(self.start_epoch, self.num_epochs):
+            accumulated_minibatch_loss = 0.0
+
+            with tqdm(self.train_loader) as pbar:
+                for batch_idx, (
+                        real_images,
+                        pooled_embedding,
+                        token_embedding,
+                        token_mask
+                ) in enumerate(pbar):
+                    real_images = real_images.to(self.device)
+                    pooled_embedding = pooled_embedding.to(self.device)
+                    token_embedding = token_embedding.to(self.device)
+                    token_mask = token_mask.to(self.device)
+                    current_batch_size = real_images.shape[0]
+
+                    t = self.diffusion.sample_timesteps(batch_size=current_batch_size)
+                    x_t, noise = self.diffusion.q_sample(x=real_images, t=t)
+
+                    with torch.autocast(device_type=self.device, dtype=torch.float16, enabled=self.fp16):
+                        predicted_noise = self.unet_model(
+                            x=x_t,
+                            timestep=t,
+                            conditional_embedding=pooled_embedding,
+                            contextual_text_embedding=token_embedding,
+                            contextual_text_mask_embedding=token_mask,
+                        )
+
+                        loss = F.smooth_l1_loss(predicted_noise, noise)
+                        loss /= self.accumulation_iters
+                        accumulated_minibatch_loss += float(loss)
+
+                    self.grad_scaler.scale(loss).backward()
+
+                    if (batch_idx + 1) % self.accumulation_iters == 0:
+                        self.grad_scaler.step(self.optimizer)
+                        self.grad_scaler.update()
+                        self.optimizer.zero_grad(set_to_none=True)
+                        self.ema.ema_step(ema_model=self.ema_model, model=self.unet_model)
+
+                        pbar.set_description(
+                            f'Loss minibatch: {float(accumulated_minibatch_loss):.4f}'
+                        )
+                        accumulated_minibatch_loss = 0.0
+
+                    if not batch_idx % self.save_every:
+                        self.sample(
+                            epoch=epoch,
+                            batch_idx=batch_idx,
+                            sample_count=self.sample_count,
+                            pooled_text_embedding=pooled_embedding[0],
+                            token_text_embedding=token_embedding[0],
+                            token_mask=token_mask[0],
+                        )
+
+                        Utils.save_checkpoint(
+                            epoch=epoch,
+                            model=self.unet_model,
+                            optimizer=self.optimizer,
+                            scheduler=self.scheduler,
+                            grad_scaler=self.grad_scaler,
+                            filename=os.path.join(self.save_path, f'model_{epoch}_{batch_idx}.pt')
+                        )
+                        Utils.save_checkpoint(
+                            epoch=epoch,
+                            model=self.ema_model,
+                            filename=os.path.join(self.save_path, f'model_ema_{epoch}_{batch_idx}.pt')
+                        )
+
+            self.scheduler.step()
 
 
 if __name__ == '__main__':
@@ -850,4 +920,3 @@ if __name__ == '__main__':
         checkpoint_path_ema=r'',
     )
     trainer.train()
-
