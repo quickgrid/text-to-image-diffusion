@@ -1,5 +1,9 @@
 """Imagen implementation.
 
+Notes:
+    - Use variable padding in embedding generation and add padding to `TOKENIZER_MAX_LENGTH` in collate function for
+    both token embedding and mask with zeros.
+
 References:
     - Demo implementation, https://github.com/quickgrid/paper-implementations/tree/main/pytorch/imagen.
     - Imagen paper, https://arxiv.org/abs/2205.11487.
@@ -387,7 +391,7 @@ class Diffusion:
         Returns:
             Generated denoised image.
         """
-        print(f'Sampling {n} images....')
+        logging.info(f'Sampling {n} images....')
 
         eps_model.eval()
         with torch.no_grad():
@@ -722,8 +726,8 @@ class Trainer:
             run_name: str = 'imagen',
             image_size: int = 64,
             image_channels: int = 3,
-            accumulation_batch_size: int = 4,
-            accumulation_iters: int = 16,
+            accumulation_batch_size: int = 32,
+            accumulation_iters: int = 2,
             sample_count: int = 1,
             num_workers: int = 0,
             device: str = 'cuda',
@@ -732,6 +736,7 @@ class Trainer:
             save_every: int = 2000,
             learning_rate: float = 1e-3,
             noise_steps: int = 500,
+            conditional_embedding_dim=768,
     ):
         self.num_epochs = num_epochs
         self.device = device
@@ -763,7 +768,17 @@ class Trainer:
             collate_fn=Utils.collate_fn,
         )
 
-        self.unet_model = EfficientUNet().to(device)
+        self.unet_model = EfficientUNet(
+            in_channels=image_channels,
+            cond_embed_dim=conditional_embedding_dim,
+            base_channel_dim=64,
+            num_resnet_blocks=(2, 1, 1),
+            channel_mults=(2, 1, 2),
+            contextual_text_embed_dim=conditional_embedding_dim,
+            use_text_conditioning=(False, True, True),
+            use_attention=(False, True, True),
+            attn_resolution=(32, 16, 8),
+        ).to(device)
         self.diffusion = Diffusion(img_size=image_size, device=self.device, noise_steps=noise_steps)
         self.optimizer = optim.Adam(
             params=self.unet_model.parameters(), lr=learning_rate, betas=(0.9, 0.999)
@@ -853,6 +868,10 @@ class Trainer:
                     token_mask = token_mask.to(self.device)
                     current_batch_size = real_images.shape[0]
 
+                    pooled_embedding = pooled_embedding.squeeze(dim=1)
+                    token_embedding = token_embedding.squeeze(dim=1)
+                    token_mask = token_mask.squeeze(dim=1).bool()
+
                     t = self.diffusion.sample_timesteps(batch_size=current_batch_size)
                     x_t, noise = self.diffusion.q_sample(x=real_images, t=t)
 
@@ -887,9 +906,9 @@ class Trainer:
                             epoch=epoch,
                             batch_idx=batch_idx,
                             sample_count=self.sample_count,
-                            pooled_text_embedding=pooled_embedding[0],
-                            token_text_embedding=token_embedding[0],
-                            token_mask=token_mask[0],
+                            pooled_text_embedding=pooled_embedding[0].unsqueeze(dim=0),
+                            token_text_embedding=token_embedding[0].unsqueeze(dim=0),
+                            token_mask=token_mask[0].unsqueeze(dim=0),
                         )
 
                         Utils.save_checkpoint(
@@ -916,7 +935,8 @@ if __name__ == '__main__':
         token_text_embedding_path=r'',
         token_mask_embedding_path=r'',
         save_path=r'',
-        checkpoint_path=r'',
-        checkpoint_path_ema=r'',
+        save_every=200,
+        # checkpoint_path=r'',
+        # checkpoint_path_ema=r'',
     )
     trainer.train()
