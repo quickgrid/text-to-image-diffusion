@@ -24,6 +24,9 @@ from lavis.processors import load_processor
 from lavis.models import load_model
 
 
+TOKENIZER_MAX_LENGTH = 80
+
+
 # Mean Pooling - Take attention mask into account for correct averaging
 def mean_pooling(model_output, attention_mask):
     token_embeddings = model_output[0]  # First element of model_output contains all token embeddings
@@ -77,9 +80,9 @@ def generate_caption(args: argparse.Namespace) -> None:
 
                         encoded_input = st_text_embed_tokenizer(
                             caption_list,
-                            padding=True,
+                            padding='max_length',
                             truncation=True,
-                            max_length=128,
+                            max_length=TOKENIZER_MAX_LENGTH,
                             return_tensors='pt'
                         )
 
@@ -141,9 +144,9 @@ def generate_caption(args: argparse.Namespace) -> None:
                 if args.embed_cap:
                     encoded_input = st_text_embed_tokenizer(
                         caption_list,
-                        padding=True,
+                        padding='max_length',
                         truncation=True,
-                        max_length=128,
+                        max_length=TOKENIZER_MAX_LENGTH,
                         return_tensors='pt'
                     )
 
