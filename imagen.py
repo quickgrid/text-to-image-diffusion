@@ -563,7 +563,7 @@ class CustomImageTextDataset(Dataset):
             token_embedding_dir: str,
             token_mask_dir: str,
             image_size: int,
-    ) -> None:
+    ):
         self.image_dir = image_dir
         self.pooled_embedding_dir = pooled_embedding_dir
         self.token_embedding_dir = token_embedding_dir
@@ -601,13 +601,13 @@ class CustomImageTextDataset(Dataset):
         file_name, file_ext = os.path.splitext(self.image_name_list[idx])
 
         image = Image.open(os.path.join(self.image_dir, self.image_name_list[idx]))
-        pooled_embedding = np.load(os.path.join(self.pooled_embedding_dir, f'pooled_embed_{file_name}.npy'))
-        token_embedding = np.load(os.path.join(self.token_embedding_dir, f'token_{file_name}.npy'))
+        pooled_text_embedding = np.load(os.path.join(self.pooled_embedding_dir, f'pooled_embed_{file_name}.npy'))
+        token_text_embedding = np.load(os.path.join(self.token_embedding_dir, f'token_{file_name}.npy'))
         token_mask = np.load(os.path.join(self.token_mask_dir, f'mask_{file_name}.npy'))
 
         image = self.image_transform(image)
-        pooled_embedding = torch.from_numpy(pooled_embedding)
-        token_embedding = torch.from_numpy(token_embedding)
+        pooled_embedding = torch.from_numpy(pooled_text_embedding)
+        token_embedding = torch.from_numpy(token_text_embedding)
         token_mask = torch.from_numpy(token_mask)
 
         return (
@@ -791,6 +791,49 @@ class Trainer:
                 model=self.ema_model,
                 filename=checkpoint_path_ema,
             )
+
+    def sample(
+            self,
+            epoch: int = None,
+            batch_idx: int = None,
+            sample_count: int = 1,
+            output_name: str = None,
+            pooled_text_embedding: torch.Tensor = None,
+            token_text_embedding: torch.Tensor = None,
+            token_mask: torch.Tensor = None,
+    ) -> None:
+        """Generates images with reverse process based on sampling method with both training model and ema model.
+        """
+        sampled_images = self.diffusion.p_sample(
+            eps_model=self.unet_model,
+            n=sample_count,
+            conditional_embedding=pooled_text_embedding,
+            contextual_text_embedding=token_text_embedding,
+            contextual_text_mask_embedding=token_mask,
+        )
+        ema_sampled_images = self.diffusion.p_sample(
+            eps_model=self.ema_model,
+            n=sample_count,
+            conditional_embedding=pooled_text_embedding,
+            contextual_text_embedding=token_text_embedding,
+            contextual_text_mask_embedding=token_mask,
+        )
+
+        model_name = f'model_{epoch}_{batch_idx}.jpg'
+        ema_model_name = f'model_ema_{epoch}_{batch_idx}.jpg'
+
+        if output_name:
+            model_name = f'{output_name}.jpg'
+            ema_model_name = f'{output_name}_ema.jpg'
+
+        Utils.save_images(
+            images=sampled_images,
+            save_path=os.path.join(self.save_path, model_name)
+        )
+        Utils.save_images(
+            images=ema_sampled_images,
+            save_path=os.path.join(self.save_path, ema_model_name)
+        )
 
     def train(self) -> None:
         pass
