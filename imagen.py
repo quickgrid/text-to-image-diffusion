@@ -110,7 +110,9 @@ class EfficientUNetDBlock(nn.Module):
         )
 
         self.conditional_embedding_layer = nn.Sequential(
-            nn.Linear(in_features=cond_embed_dim, out_features=out_channels)
+            nn.Linear(in_features=cond_embed_dim, out_features=out_channels),
+            nn.SiLU(),
+            nn.Linear(in_features=out_channels, out_features=out_channels),
         )
 
         self.resnet_blocks = nn.Sequential()
@@ -121,7 +123,9 @@ class EfficientUNetDBlock(nn.Module):
 
         if use_text_conditioning:
             self.contextual_text_embedding_layer = nn.Sequential(
-                nn.Linear(in_features=contextual_text_embed_dim, out_features=out_channels)
+                nn.Linear(in_features=contextual_text_embed_dim, out_features=out_channels),
+                nn.SiLU(),
+                nn.Linear(in_features=out_channels, out_features=out_channels),
             )
 
         self.mem_efficient_attn = Attention(
@@ -205,7 +209,9 @@ class EfficientUNetUBlock(nn.Module):
         self.use_conv = True if stride is not None else False
 
         self.conditional_embedding_layer = nn.Sequential(
-            nn.Linear(in_features=cond_embed_dim, out_features=out_channels)
+            nn.Linear(in_features=cond_embed_dim, out_features=out_channels),
+            nn.SiLU(),
+            nn.Linear(in_features=out_channels, out_features=out_channels),
         )
 
         self.input_embedding_layer = nn.Conv2d(
@@ -539,9 +545,7 @@ class EfficientUNet(nn.Module):
         As shown in Figure A.30 the last unet dblock and first unet block in the middle do not have skip connection.
         """
         x = self.initial_conv(x)
-
-        timestep = self.pos_encoding(timestep)
-        conditional_embedding += timestep
+        conditional_embedding += self.pos_encoding(timestep)
 
         x_skip_outputs = []
         for dblock in self.dblocks:
@@ -726,7 +730,7 @@ class Trainer:
             run_name: str = 'imagen',
             image_size: int = 64,
             image_channels: int = 3,
-            accumulation_batch_size: int = 32,
+            accumulation_batch_size: int = 28,
             accumulation_iters: int = 2,
             sample_count: int = 1,
             num_workers: int = 0,
@@ -734,7 +738,7 @@ class Trainer:
             num_epochs: int = 100000,
             fp16: bool = False,
             save_every: int = 2000,
-            learning_rate: float = 1e-3,
+            learning_rate: float = 2e-4,
             noise_steps: int = 500,
             conditional_embedding_dim=768,
     ):
@@ -772,16 +776,19 @@ class Trainer:
             in_channels=image_channels,
             cond_embed_dim=conditional_embedding_dim,
             base_channel_dim=64,
-            num_resnet_blocks=(2, 1, 1),
-            channel_mults=(2, 1, 2),
+            num_resnet_blocks=(2, 2, 4, 8),
+            channel_mults=(2, 2, 4, 8),
             contextual_text_embed_dim=conditional_embedding_dim,
-            use_text_conditioning=(False, True, True),
-            use_attention=(False, True, True),
-            attn_resolution=(32, 16, 8),
+            use_text_conditioning=(False, True, True, True),
+            use_attention=(False, True, True, True),
+            attn_resolution=(32, 64, 32, 16),
         ).to(device)
+
+        print(self.unet_model)
+
         self.diffusion = Diffusion(img_size=image_size, device=self.device, noise_steps=noise_steps)
         self.optimizer = optim.Adam(
-            params=self.unet_model.parameters(), lr=learning_rate, betas=(0.9, 0.999)
+            params=self.unet_model.parameters(), lr=learning_rate, # betas=(0.9, 0.999)
         )
         self.scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer=self.optimizer, T_max=300)
         # self.loss_fn = nn.MSELoss().to(self.device)
