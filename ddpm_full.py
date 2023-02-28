@@ -341,51 +341,7 @@ class TransformerEncoderSA(nn.Module):
         attention_value = attention_value + x
         attention_value = self.ff_self(attention_value) + attention_value
         return attention_value.permute(0, 2, 1).view(-1, self.num_channels, self.size, self.size)
-
-
-class TransformerEncoderMemEffSA(nn.Module):
-    def __init__(self, num_channels: int, num_heads: int = 8, dim_head=64):
-        """A block of transformer encoder with mutli head self attention from vision transformers paper,
-         https://arxiv.org/pdf/2010.11929.pdf.
-        """
-        super(TransformerEncoderMemEffSA, self).__init__()
-        self.num_channels = num_channels
-        # self.mha = nn.MultiheadAttention(embed_dim=num_channels, num_heads=num_heads, batch_first=True)
-        self.ln_1 = nn.LayerNorm([num_channels])
-        self.ln_2 = nn.LayerNorm([num_channels])
-        self.ff_self = nn.Sequential(
-            nn.LayerNorm([num_channels]),
-            nn.Linear(in_features=num_channels, out_features=num_channels),
-            nn.LayerNorm([num_channels]),
-            nn.Linear(in_features=num_channels, out_features=num_channels)
-        )
-
-        self.mem_efficient_attn = Attention(
-            dim=num_channels,
-            dim_head=dim_head,  # dimension per head
-            heads=num_heads,  # number of attention heads
-            causal=True,  # autoregressive or not
-            memory_efficient=True,
-            # whether to use memory efficient attention (can be turned off to test against normal attention)
-            q_bucket_size=1024,  # bucket size along queries dimension
-            k_bucket_size=2048  # bucket size along key / values dimension
-        )
-
-    def forward(self, x: torch.Tensor, context: torch.Tensor = None, mask: torch.Tensor = None) -> torch.Tensor:
-        """Self attention.
-
-        Input feature map [4, 128, 32, 32], flattened to [4, 128, 32 x 32]. Which is reshaped to per pixel
-        feature map order, [4, 1024, 128].
-
-        Attention output is same shape as input feature map to multihead attention module which are added element wise.
-        Before returning attention output is converted back input feature map x shape. Opposite of feature map to
-        mha input is done which gives output [4, 128, 32, 32].
-        """
-        attention_value = self.mem_efficient_attn(x=x, context=context, mask=mask)
-        x_ln = self.ln_1(attention_value + x)
-        attention_value = self.ff_self(x_ln) + x_ln
-        return self.ln_2(attention_value)
-
+    
 
 class UNetConditional(nn.Module):
     def __init__(
