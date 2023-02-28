@@ -341,7 +341,7 @@ class TransformerEncoderSA(nn.Module):
         attention_value = attention_value + x
         attention_value = self.ff_self(attention_value) + attention_value
         return attention_value.permute(0, 2, 1).view(-1, self.num_channels, self.size, self.size)
-    
+
 
 class UNetConditional(nn.Module):
     def __init__(
@@ -709,7 +709,6 @@ class TxtToImgTrainer:
     def train(self) -> None:
         logging.info(f'Training started....')
         for epoch in range(self.start_epoch, self.num_epochs):
-            # total_loss = 0.0
             accumulated_minibatch_loss = 0.0
 
             with tqdm(self.train_loader) as pbar:
@@ -792,7 +791,10 @@ def mean_pooling(model_output, attention_mask):
     return sum_embeddings / sum_mask
 
 
-def generate_sentence_embedding(input_caption: str, custom_mean_pool: bool = False) -> torch.Tensor:
+def generate_sentence_embedding(
+        input_caption: str,
+        custom_mean_pool: bool = False
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Generates pooled embedding (same shape per text input) with language model.
 
     Returns:
@@ -819,7 +821,24 @@ def generate_sentence_embedding(input_caption: str, custom_mean_pool: bool = Fal
     else:
         caption_embeddings = caption_token_embeddings.pooler_output
 
-    return caption_embeddings
+    return caption_embeddings, caption_token_embeddings.last_hidden_state, encoded_input['attention_mask']
+
+
+def generate_sample(input_caption: str, output_name: str = 'output5') -> None:
+    pooled_emb, token_emb, mask = generate_sentence_embedding(
+        input_caption=input_caption
+    )
+    pooled_emb = pooled_emb.cuda().unsqueeze(dim=0)
+    token_emb = token_emb.cuda().unsqueeze(dim=0)
+    mask = mask.cuda().bool().unsqueeze(dim=0)
+
+    trainer.sample(
+        output_name=output_name,
+        sample_count=1,
+        pooled_text_embedding=pooled_emb,
+        token_text_embedding=token_emb,
+        token_mask=mask,
+    )
 
 
 if __name__ == '__main__':
@@ -830,24 +849,11 @@ if __name__ == '__main__':
         token_mask_path=r'',
         save_path=r'',
         save_every=200,
-        # checkpoint_path=r'',
-        # checkpoint_path_ema=r'',
+        checkpoint_path=r'',
+        checkpoint_path_ema=r'',
     )
     trainer.train()
 
-    # sentence_embedding = torch.from_numpy(
-    #     np.load(r'PATH_TO_GENERATED_CAPTION_EMBEDDINGS\sentence_003767.npy')
-    # ).unsqueeze(dim=1).to('cuda')
-    # trainer.sample(output_name='output5', sample_count=1, sentence_embedding=sentence_embedding)
-
-    # sentence_embedding = generate_sentence_embedding(
-    #     # input_caption="a duck flying towards a ship"
-    #     input_caption="a man is wearing glasses, smiling, he has long black hair"
-    # ).unsqueeze(dim=1).to('cuda')
-    # trainer.sample(output_name='output5', sample_count=1, sentence_embedding=sentence_embedding)
-
-    # trainer.sample_gif(
-    #     output_name='output8',
-    #     sample_count=1,
-    #     save_path=r'PATH_TO_SAVE_LOCATION\ddpm',
+    # generate_sample(
+    #     input_caption="a man is wearing glasses, smiling"
     # )
