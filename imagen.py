@@ -35,13 +35,56 @@ from memory_efficient_attention import Attention
 logging.basicConfig(format="%(asctime)s - %(levelname)s: %(message)s", level=logging.INFO, datefmt="%I:%M:%S")
 
 
+class TransformerEncoderMemEffSA(nn.Module):
+    def __init__(self, num_channels: int, num_heads: int = 8, dim_head=64):
+        """A block of transformer encoder with mutli head self attention from vision transformers paper,
+         https://arxiv.org/pdf/2010.11929.pdf.
+        """
+        super(TransformerEncoderMemEffSA, self).__init__()
+        self.num_channels = num_channels
+        # self.mha = nn.MultiheadAttention(embed_dim=num_channels, num_heads=num_heads, batch_first=True)
+        self.ln_1 = nn.LayerNorm([num_channels])
+        self.ln_2 = nn.LayerNorm([num_channels])
+        self.ff_self = nn.Sequential(
+            nn.LayerNorm([num_channels]),
+            nn.Linear(in_features=num_channels, out_features=num_channels),
+            nn.LayerNorm([num_channels]),
+            nn.Linear(in_features=num_channels, out_features=num_channels)
+        )
+
+        self.mem_efficient_attn = Attention(
+            dim=num_channels,
+            dim_head=dim_head,  # dimension per head
+            heads=num_heads,  # number of attention heads
+            causal=True,  # autoregressive or not
+            memory_efficient=True,
+            # whether to use memory efficient attention (can be turned off to test against normal attention)
+            q_bucket_size=1024,  # bucket size along queries dimension
+            k_bucket_size=2048  # bucket size along key / values dimension
+        )
+
+    def forward(self, x: torch.Tensor, context: torch.Tensor = None, mask: torch.Tensor = None) -> torch.Tensor:
+        """Self attention.
+
+        Input feature map [4, 128, 32, 32], flattened to [4, 128, 32 x 32]. Which is reshaped to per pixel
+        feature map order, [4, 1024, 128].
+
+        Attention output is same shape as input feature map to multihead attention module which are added element wise.
+        Before returning attention output is converted back input feature map x shape. Opposite of feature map to
+        mha input is done which gives output [4, 128, 32, 32].
+        """
+        attention_value = self.mem_efficient_attn(x=x, context=context, mask=mask)
+        x_ln = self.ln_1(attention_value + x)
+        attention_value = self.ff_self(x_ln) + x_ln
+        return self.ln_2(attention_value)
+
+
 class EfficientUNetResNetBlock(nn.Module):
     def __init__(
             self,
             in_channels: int,
             out_channels: int,
             num_groups: int = 8,
-            residual: bool = False,
     ):
         """Efficient UNet implementation from Figure A.27.
 
@@ -53,25 +96,33 @@ class EfficientUNetResNetBlock(nn.Module):
         """
         super(EfficientUNetResNetBlock, self).__init__()
 
-        self.residual = residual
         self.main_path = nn.Sequential(
             nn.GroupNorm(num_groups=num_groups, num_channels=in_channels),
             nn.SiLU(),
-            nn.Conv2d(in_channels=in_channels, out_channels=out_channels, kernel_size=(3, 3), padding=(1, 1)),
+            nn.Conv2d(
+                in_channels=in_channels,
+                out_channels=out_channels,
+                kernel_size=(3, 3),
+                padding=(1, 1),
+                bias=False,
+            ),
             nn.GroupNorm(num_groups=num_groups, num_channels=out_channels),
             nn.SiLU(),
-            nn.Conv2d(in_channels=out_channels, out_channels=out_channels, kernel_size=(3, 3), padding=(1, 1)),
+            nn.Conv2d(
+                in_channels=out_channels,
+                out_channels=out_channels,
+                kernel_size=(3, 3),
+                padding=(1, 1),
+                bias = False,
+            ),
         )
 
         self.skip_path = nn.Conv2d(
-            in_channels=in_channels, out_channels=out_channels, kernel_size=(1, 1),
+            in_channels=in_channels, out_channels=out_channels, kernel_size=(1, 1), bias=False,
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if self.residual:
-            return F.gelu(self.main_path(x) + self.skip_path(x))
-        
-        return self.main_path(x)
+        return F.gelu(self.main_path(x) + self.skip_path(x))
 
 
 class EfficientUNetDBlock(nn.Module):
@@ -110,12 +161,21 @@ class EfficientUNetDBlock(nn.Module):
         self.use_text_conditioning = use_text_conditioning
         self.use_conv = True if stride is not None else False
 
-        self.initial_conv = nn.Conv2d(
-            in_channels=in_channels, out_channels=out_channels, kernel_size=(3, 3), padding=(1, 1), stride=stride
+        self.initial_conv = nn.Sequential(
+            nn.Conv2d(
+                in_channels=in_channels,
+                out_channels=out_channels,
+                kernel_size=(3, 3),
+                padding=(1, 1),
+                stride=stride,
+                bias=False,
+            ),
+            # nn.GroupNorm(num_groups=1, num_channels=out_channels),
+            # nn.GELU(),
         )
 
         self.conditional_embedding_layer = nn.Sequential(
-            nn.LayerNorm(cond_embed_dim),
+            # nn.LayerNorm(cond_embed_dim),
             nn.SiLU(),
             nn.Linear(in_features=cond_embed_dim, out_features=out_channels),
         )
@@ -123,28 +183,31 @@ class EfficientUNetDBlock(nn.Module):
         self.resnet_blocks = nn.Sequential()
         for _ in range(num_resnet_blocks):
             self.resnet_blocks.append(
-                EfficientUNetResNetBlock(in_channels=out_channels, out_channels=out_channels, residual=True),
-            )
-            self.resnet_blocks.append(
                 EfficientUNetResNetBlock(in_channels=out_channels, out_channels=out_channels),
             )
 
         if use_text_conditioning:
             self.contextual_text_embedding_layer = nn.Sequential(
-                nn.LayerNorm(contextual_text_embed_dim),
+                # nn.LayerNorm(contextual_text_embed_dim),
                 nn.SiLU(),
                 nn.Linear(in_features=contextual_text_embed_dim, out_features=out_channels),
             )
 
-        self.mem_efficient_attn = Attention(
-            dim=out_channels,
-            dim_head=attn_resolution,  # dimension per head
-            heads=8,  # number of attention heads
-            causal=True,  # autoregressive or not
-            memory_efficient=True,
-            # whether to use memory efficient attention (can be turned off to test against normal attention)
-            q_bucket_size=1024,  # bucket size along queries dimension
-            k_bucket_size=2048  # bucket size along key / values dimension
+        # self.mem_efficient_attn = Attention(
+        #     dim=out_channels,
+        #     dim_head=attn_resolution,  # dimension per head
+        #     heads=8,  # number of attention heads
+        #     causal=True,  # autoregressive or not
+        #     memory_efficient=True,
+        #     # whether to use memory efficient attention (can be turned off to test against normal attention)
+        #     q_bucket_size=1024,  # bucket size along queries dimension
+        #     k_bucket_size=2048  # bucket size along key / values dimension
+        # )
+
+        self.mem_efficient_attn = TransformerEncoderMemEffSA(
+            num_channels=out_channels,
+            num_heads=8,
+            dim_head=attn_resolution
         )
 
     def forward(
@@ -217,34 +280,41 @@ class EfficientUNetUBlock(nn.Module):
         self.use_conv = True if stride is not None else False
 
         self.conditional_embedding_layer = nn.Sequential(
-            nn.LayerNorm(cond_embed_dim),
+            # nn.LayerNorm(cond_embed_dim),
             nn.SiLU(),
             nn.Linear(in_features=cond_embed_dim, out_features=out_channels),
         )
 
-        self.input_embedding_layer = nn.Conv2d(
-            in_channels=in_channels, out_channels=out_channels, kernel_size=(1, 1)
+        self.initial_conv = nn.Sequential(
+            nn.Conv2d(
+                in_channels=in_channels, out_channels=out_channels, kernel_size=(1, 1), bias=False,
+            ),
+            # nn.GroupNorm(num_groups=1, num_channels=out_channels),
+            # nn.GELU(),
         )
 
         self.resnet_blocks = nn.Sequential()
         for _ in range(num_resnet_blocks):
             self.resnet_blocks.append(
-                EfficientUNetResNetBlock(in_channels=out_channels, out_channels=out_channels, residual=True),
-            )
-            self.resnet_blocks.append(
                 EfficientUNetResNetBlock(in_channels=out_channels, out_channels=out_channels)
             )
 
         if use_attention:
-            self.mem_efficient_attn = Attention(
-                dim=out_channels,
-                dim_head=attn_resolution,  # dimension per head
-                heads=8,  # number of attention heads
-                causal=True,  # autoregressive or not
-                memory_efficient=True,
-                # whether to use memory efficient attention (can be turned off to test against normal attention)
-                q_bucket_size=1024,  # bucket size along queries dimension
-                k_bucket_size=2048  # bucket size along key / values dimension
+            # self.mem_efficient_attn = Attention(
+            #     dim=out_channels,
+            #     dim_head=attn_resolution,  # dimension per head
+            #     heads=8,  # number of attention heads
+            #     causal=True,  # autoregressive or not
+            #     memory_efficient=True,
+            #     # whether to use memory efficient attention (can be turned off to test against normal attention)
+            #     q_bucket_size=1024,  # bucket size along queries dimension
+            #     k_bucket_size=2048  # bucket size along key / values dimension
+            # )
+
+            self.mem_efficient_attn = TransformerEncoderMemEffSA(
+                num_channels=out_channels,
+                num_heads=8,
+                dim_head=attn_resolution
             )
 
         self.last_conv_upsampler = nn.Sequential(
@@ -269,7 +339,7 @@ class EfficientUNetUBlock(nn.Module):
         cond_embed = cond_embed.view(
             cond_embed.shape[0], cond_embed.shape[1], 1, 1
         ).repeat(1, 1, x.shape[2], x.shape[3])
-        x = self.input_embedding_layer(x)
+        x = self.initial_conv(x)
         x = x + cond_embed
         x = self.resnet_blocks(x)
 
@@ -490,11 +560,16 @@ class EfficientUNet(nn.Module):
         mutliplied_channels_reversed = np.flip(mutliplied_channels)
         num_resnet_blocks_reversed = np.flip(num_resnet_blocks)
 
-        self.initial_conv = nn.Conv2d(
-            in_channels=in_channels,
-            out_channels=mutliplied_channels[0],
-            kernel_size=(3, 3),
-            padding=(1, 1),
+        self.initial_conv = nn.Sequential(
+            nn.Conv2d(
+                in_channels=in_channels,
+                out_channels=mutliplied_channels[0],
+                kernel_size=(3, 3),
+                padding=(1, 1),
+                bias=False,
+            ),
+            # nn.GroupNorm(num_groups=1, num_channels=mutliplied_channels[0]),
+            # nn.GELU(),
         )
 
         self.dblocks = nn.ModuleList()
@@ -555,9 +630,9 @@ class EfficientUNet(nn.Module):
 
         As shown in Figure A.30 the last unet dblock and first unet block in the middle do not have skip connection.
         """
-        x = self.initial_conv(x)
+        conditional_embedding = conditional_embedding + self.pos_encoding(timestep)
 
-        conditional_embedding += self.pos_encoding(timestep)
+        x = self.initial_conv(x)
 
         x_skip_outputs = []
         for dblock in self.dblocks:
@@ -742,7 +817,7 @@ class Trainer:
             run_name: str = 'imagen',
             image_size: int = 64,
             image_channels: int = 3,
-            accumulation_batch_size: int = 16,
+            accumulation_batch_size: int = 24,
             accumulation_iters: int = 2,
             sample_count: int = 1,
             num_workers: int = 0,
@@ -750,7 +825,7 @@ class Trainer:
             num_epochs: int = 100000,
             fp16: bool = False,
             save_every: int = 2000,
-            learning_rate: float = 2e-4,
+            learning_rate: float = 3e-4,
             noise_steps: int = 500,
             conditional_embedding_dim=768,
     ):
@@ -787,21 +862,26 @@ class Trainer:
         self.unet_model = EfficientUNet(
             in_channels=image_channels,
             cond_embed_dim=conditional_embedding_dim,
-            base_channel_dim=64,
-            num_resnet_blocks=(2, 2, 4, 8),
-            channel_mults=(2, 2, 4, 8),
+            base_channel_dim=32,
+            num_resnet_blocks=(2, 2, 2, 2, 2),
+            channel_mults=(2, 2, 2, 2, 2),
             contextual_text_embed_dim=conditional_embedding_dim,
-            use_text_conditioning=(False, True, True, True),
-            use_attention=(False, True, True, True),
-            attn_resolution=(32, 64, 32, 16),
+            use_text_conditioning=(False, True, True, True, True),
+            use_attention=(False, True, True, True, True),
+            attn_resolution=(32, 64, 32, 32, 16),
         ).to(device)
 
         print(self.unet_model)
+        # return
 
         self.diffusion = Diffusion(img_size=image_size, device=self.device, noise_steps=noise_steps)
-        self.optimizer = optim.Adam(
-            params=self.unet_model.parameters(), lr=learning_rate, # betas=(0.9, 0.999)
+        # self.optimizer = optim.Adam(
+        #     params=self.unet_model.parameters(), lr=learning_rate, betas=(0.9, 0.999)
+        # )
+        self.optimizer = optim.AdamW(
+            params=self.unet_model.parameters(), lr=learning_rate,
         )
+
         self.scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer=self.optimizer, T_max=300)
         # self.loss_fn = nn.MSELoss().to(self.device)
         self.grad_scaler = GradScaler()
@@ -904,6 +984,7 @@ class Trainer:
                         )
 
                         loss = F.smooth_l1_loss(predicted_noise, noise)
+                        # loss = F.mse_loss(predicted_noise, noise)
                         loss /= self.accumulation_iters
                         accumulated_minibatch_loss += float(loss)
 
