@@ -280,12 +280,12 @@ class Up(nn.Module):
         return x + emb
 
 
-class AttentionBlock(nn.Module):
+class TransformerAttentionBlock(nn.Module):
     def __init__(self, num_channels: int, size: int, num_heads: int = 8, dim_head=64, embed_dim=768):
         """A block of transformer encoder with mutli head self attention from vision transformers paper,
          https://arxiv.org/pdf/2010.11929.pdf.
         """
-        super(AttentionBlock, self).__init__()
+        super(TransformerAttentionBlock, self).__init__()
         self.num_channels = num_channels
         self.size = size
         # self.mha = nn.MultiheadAttention(embed_dim=num_channels, num_heads=num_heads, batch_first=True)
@@ -362,22 +362,22 @@ class UNetConditional(nn.Module):
 
         self.input_conv = DoubleConv(in_channels, 64)
         self.down1 = Down(64, 128)
-        self.sa1 = AttentionBlock(128, 32)
+        self.sa1 = TransformerAttentionBlock(128, 32)
         self.down2 = Down(128, 256)
-        self.sa2 = AttentionBlock(256, 16)
+        self.sa2 = TransformerAttentionBlock(256, 16)
         self.down3 = Down(256, 256)
-        self.sa3 = AttentionBlock(256, 8)
+        self.sa3 = TransformerAttentionBlock(256, 8)
 
         self.bottleneck1 = DoubleConv(256, 512)
         self.bottleneck2 = DoubleConv(512, 512)
         self.bottleneck3 = DoubleConv(512, 256)
 
         self.up1 = Up(512, 128)
-        self.sa4 = AttentionBlock(128, 16)
+        self.sa4 = TransformerAttentionBlock(128, 16)
         self.up2 = Up(256, 64)
-        self.sa5 = AttentionBlock(64, 32)
+        self.sa5 = TransformerAttentionBlock(64, 32)
         self.up3 = Up(128, 64)
-        self.sa6 = AttentionBlock(64, 64)
+        self.sa6 = TransformerAttentionBlock(64, 64)
         self.out_conv = nn.Conv2d(in_channels=64, out_channels=out_channels, kernel_size=(1, 1))
 
         # self.time_projection = nn.Conv2d(in_channels=1024, out_channels=time_dim, padding=(1, 1), kernel_size=(3, 3))
