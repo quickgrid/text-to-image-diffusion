@@ -3,7 +3,7 @@
 
 import torch
 
-from imagen import (
+from experiment import (
     EfficientUNetDBlock,
     EfficientUNetUBlock,
     EfficientUNet,
