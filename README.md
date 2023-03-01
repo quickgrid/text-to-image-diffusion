@@ -16,4 +16,4 @@ Experimental (working!) custom implementation of conditional and unconditional d
 | `blip_caption_embedding_generation.py` | Generates and saves text captions of images and pooled embedding, token embedding, mask of captions. |
 | `ddpm_basic.py` | Modifies [ddpm example](https://github.com/quickgrid/pytorch-diffusion) to support pooled text conditioning. |
 | `ddpm_full.py` | Modifies [ddpm example](https://github.com/quickgrid/pytorch-diffusion) to support pooled text, token conditioning. |
-| `imagen.py` | Modifies [imagen example](https://github.com/quickgrid/paper-implementations/tree/main/pytorch/imagen). **Does not work yet.** |
+| `experiment.py` | Modifies [imagen example](https://github.com/quickgrid/paper-implementations/tree/main/pytorch/imagen). **Does not work yet.** |
