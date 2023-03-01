@@ -231,6 +231,7 @@ class Down(nn.Module):
         )
 
         self.emb_layer = nn.Sequential(
+            nn.LayerNorm([emb_dim * 2]),
             nn.SiLU(),
             nn.Linear(in_features=emb_dim * 2, out_features=out_channels),
         )
@@ -265,6 +266,7 @@ class Up(nn.Module):
         )
 
         self.emb_layer = nn.Sequential(
+            nn.LayerNorm([emb_dim * 2]),
             nn.SiLU(),
             nn.Linear(in_features=emb_dim * 2, out_features=out_channels),
         )
@@ -278,21 +280,23 @@ class Up(nn.Module):
         return x + emb
 
 
-class TransformerEncoderSA(nn.Module):
+class AttentionBlock(nn.Module):
     def __init__(self, num_channels: int, size: int, num_heads: int = 8, dim_head=64, embed_dim=768):
         """A block of transformer encoder with mutli head self attention from vision transformers paper,
          https://arxiv.org/pdf/2010.11929.pdf.
         """
-        super(TransformerEncoderSA, self).__init__()
+        super(AttentionBlock, self).__init__()
         self.num_channels = num_channels
         self.size = size
         # self.mha = nn.MultiheadAttention(embed_dim=num_channels, num_heads=num_heads, batch_first=True)
-        self.ln = nn.LayerNorm([num_channels])
+        self.ln_1 = nn.LayerNorm([num_channels])
+        self.ln_2 = nn.LayerNorm([num_channels])
         self.ff_self = nn.Sequential(
             nn.LayerNorm([num_channels]),
             nn.Linear(in_features=num_channels, out_features=num_channels),
             nn.LayerNorm([num_channels]),
-            nn.Linear(in_features=num_channels, out_features=num_channels)
+            nn.GELU(),
+            nn.Linear(in_features=num_channels, out_features=num_channels),
         )
 
         self.mem_efficient_attn = Attention(
@@ -307,6 +311,7 @@ class TransformerEncoderSA(nn.Module):
         )
 
         self.contextual_text_embedder = nn.Sequential(
+            nn.LayerNorm([embed_dim]),
             nn.SiLU(),
             nn.Linear(in_features=embed_dim, out_features=num_channels),
         )
@@ -327,18 +332,18 @@ class TransformerEncoderSA(nn.Module):
         mha input is done which gives output [4, 128, 32, 32].
         """
         x = x.view(-1, self.num_channels, self.size * self.size).permute(0, 2, 1)
-        x_ln = self.ln(x)
+        x_ln_1 = self.ln_1(x)
         # attention_value, _ = self.mha(query=x_ln, key=x_ln, value=x_ln)
 
         if contextual_text_embedding is not None:
             contextual_text_embedding = self.contextual_text_embedder(contextual_text_embedding)
 
         attention_value = self.mem_efficient_attn(
-            x=x_ln,
+            x=x_ln_1,
             context=contextual_text_embedding,
             mask=contextual_text_mask
         )
-        attention_value = attention_value + x
+        attention_value = self.ln_2(attention_value + x)
         attention_value = self.ff_self(attention_value) + attention_value
         return attention_value.permute(0, 2, 1).view(-1, self.num_channels, self.size, self.size)
 
@@ -357,22 +362,22 @@ class UNetConditional(nn.Module):
 
         self.input_conv = DoubleConv(in_channels, 64)
         self.down1 = Down(64, 128)
-        self.sa1 = TransformerEncoderSA(128, 32)
+        self.sa1 = AttentionBlock(128, 32)
         self.down2 = Down(128, 256)
-        self.sa2 = TransformerEncoderSA(256, 16)
+        self.sa2 = AttentionBlock(256, 16)
         self.down3 = Down(256, 256)
-        self.sa3 = TransformerEncoderSA(256, 8)
+        self.sa3 = AttentionBlock(256, 8)
 
         self.bottleneck1 = DoubleConv(256, 512)
         self.bottleneck2 = DoubleConv(512, 512)
         self.bottleneck3 = DoubleConv(512, 256)
 
         self.up1 = Up(512, 128)
-        self.sa4 = TransformerEncoderSA(128, 16)
+        self.sa4 = AttentionBlock(128, 16)
         self.up2 = Up(256, 64)
-        self.sa5 = TransformerEncoderSA(64, 32)
+        self.sa5 = AttentionBlock(64, 32)
         self.up3 = Up(128, 64)
-        self.sa6 = TransformerEncoderSA(64, 64)
+        self.sa6 = AttentionBlock(64, 64)
         self.out_conv = nn.Conv2d(in_channels=64, out_channels=out_channels, kernel_size=(1, 1))
 
         # self.time_projection = nn.Conv2d(in_channels=1024, out_channels=time_dim, padding=(1, 1), kernel_size=(3, 3))
@@ -397,10 +402,13 @@ class UNetConditional(nn.Module):
         t = self.pos_encoding(t)
 
         if conditional_embedding is not None:
+            # conditional_embedding = F.normalize(conditional_embedding, dim=2)
             t = torch.cat([t, conditional_embedding], dim=2).squeeze(dim=1)
 
             contextual_text_embedding.squeeze_(dim=1)
             contextual_text_mask.squeeze_(dim=1)
+
+            # contextual_text_embedding = F.normalize(contextual_text_embedding, dim=2)
 
         x1 = self.input_conv(x)
 
@@ -593,15 +601,15 @@ class TxtToImgTrainer:
             run_name: str = 'ddpm',
             image_size: int = 64,
             image_channels: int = 3,
-            accumulation_batch_size: int = 22,
-            accumulation_iters: int = 3,
+            accumulation_batch_size: int = 12,
+            accumulation_iters: int = 5,
             sample_count: int = 1,
             num_workers: int = 0,
             device: str = 'cuda',
             num_epochs: int = 10000,
             fp16: bool = False,
             save_every: int = 2000,
-            learning_rate: float = 1e-4,
+            learning_rate: float = 1e-3,
             noise_steps: int = 500,
     ):
         self.embedding_dir = embedding_dir
@@ -637,7 +645,7 @@ class TxtToImgTrainer:
 
         self.unet_model = UNetConditional().to(device)
         self.diffusion = Diffusion(img_size=image_size, device=self.device, noise_steps=noise_steps)
-        self.optimizer = optim.Adam(
+        self.optimizer = optim.AdamW(
             params=self.unet_model.parameters(), lr=learning_rate,  # betas=(0.9, 0.999)
         )
         self.scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer=self.optimizer, T_max=300)
