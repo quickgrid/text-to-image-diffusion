@@ -17,4 +17,4 @@ Experimental (working!) custom implementation of conditional and unconditional d
 
 ### References
 
-- Todo.
+- Memory efficient attention and flash attention. https://github.com/lucidrains/memory-efficient-attention-pytorch
