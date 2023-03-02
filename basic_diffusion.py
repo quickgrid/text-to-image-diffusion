@@ -23,8 +23,7 @@ from torch import optim
 from torch.functional import F
 from torch.utils.tensorboard import SummaryWriter
 from transformers import AutoTokenizer, AutoModel
-
-from memory_efficient_attention import Attention
+from memory_efficient_attention_pytorch import Attention
 
 logging.basicConfig(format="%(asctime)s - %(levelname)s: %(message)s", level=logging.INFO, datefmt="%I:%M:%S")
 
