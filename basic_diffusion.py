@@ -289,7 +289,6 @@ class TransformerAttentionBlock(nn.Module):
         self.size = size
         # self.mha = nn.MultiheadAttention(embed_dim=num_channels, num_heads=num_heads, batch_first=True)
         self.ln_1 = nn.LayerNorm([num_channels])
-        self.ln_2 = nn.LayerNorm([num_channels])
         self.ff_self = nn.Sequential(
             nn.LayerNorm([num_channels]),
             nn.Linear(in_features=num_channels, out_features=num_channels),
@@ -342,7 +341,7 @@ class TransformerAttentionBlock(nn.Module):
             context=contextual_text_embedding,
             mask=contextual_text_mask
         )
-        attention_value = self.ln_2(attention_value + x)
+        attention_value = attention_value + x
         attention_value = self.ff_self(attention_value) + attention_value
         return attention_value.permute(0, 2, 1).view(-1, self.num_channels, self.size, self.size)
 
