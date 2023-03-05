@@ -7,16 +7,20 @@ References:
     - Self Attention Paper, https://arxiv.org/pdf/1706.03762.pdf
     - ViT Paper, https://arxiv.org/pdf/2010.11929.pdf
 """
+import math
+
 import torch
+from torch.functional import F
 from torch import nn
 from einops.layers.torch import Rearrange
 from memory_efficient_attention_pytorch.flash_attention import FlashAttention
 
 
-class TransformerEncoderBlock(nn.Module):
+class TransformerEncoder(nn.Module):
     def __init__(
             self,
             dim: int,
+            num_blocks: int = 1,
             mlp_hidden_dim: int = 1024,
             num_head: int = 8,
             per_dim_head: int = 64,
@@ -24,37 +28,29 @@ class TransformerEncoderBlock(nn.Module):
     ):
         """Runs embedded patches through transformer encoder. Figure 1 of ViT paper.
         """
-        super(TransformerEncoderBlock, self).__init__()
-
-        self.layer_norm = nn.LayerNorm([dim])
-        self.attn = FlashAttention(dim=dim, heads=num_head, dim_head=per_dim_head)
-        self.mlp = nn.Sequential(
-            nn.LayerNorm([dim]),
-            nn.Linear(in_features=dim, out_features=mlp_hidden_dim),
-            nn.GELU(),
-            nn.Dropout(p=dropout),
-            nn.Linear(in_features=mlp_hidden_dim, out_features=dim),
-            nn.Dropout(p=dropout),
-        )
-
-    def forward(self, x: torch.Tensor, context: torch.Tensor = None, mask: torch.Tensor = None) -> torch.Tensor:
-        x = self.attn(x=self.layer_norm(x), context=context, mask=mask) + x
-        return self.mlp(x) + x
-
-
-class TransformerEncoder(nn.Module):
-    def __init__(self, num_blocks: int, **kwargs):
-        """Receives same keyword arguments from `TransformerEncoderBlock`.
-        """
         super(TransformerEncoder, self).__init__()
 
         self.blocks = nn.ModuleList()
         for _ in range(num_blocks):
-            self.blocks.append(TransformerEncoderBlock(**kwargs))
+            self.blocks.append(
+                nn.ModuleList([
+                    nn.LayerNorm([dim]),
+                    FlashAttention(dim=dim, heads=num_head, dim_head=per_dim_head),
+                    nn.Sequential(
+                        nn.LayerNorm([dim]),
+                        nn.Linear(in_features=dim, out_features=mlp_hidden_dim),
+                        nn.GELU(),
+                        nn.Dropout(p=dropout),
+                        nn.Linear(in_features=mlp_hidden_dim, out_features=dim),
+                        nn.Dropout(p=dropout),
+                    ),
+                ])
+            )
 
     def forward(self, x: torch.Tensor, context: torch.Tensor = None, mask: torch.Tensor = None) -> torch.Tensor:
-        for transformer_block in self.blocks:
-            x = transformer_block(x=x, context=context, mask=mask)
+        for layer_norm, attn, mlp in self.blocks:
+            x = attn(x=layer_norm(x), context=context, mask=mask) + x
+            x = mlp(x) + x
         return x
 
 
@@ -70,7 +66,7 @@ class ViT(nn.Module):
             **kwargs,
     ):
         """ViT implementation without class token. Assumes square input image tensor in shape of (b, c, h, w) and
-        square patch size. Uses learned 1D positional encoding.
+         square patch size. Uses learned 1D positional encoding.
         """
         super(ViT, self).__init__()
 
@@ -109,7 +105,6 @@ class ViT(nn.Module):
 
     def forward(self, x: torch.Tensor, context: torch.Tensor = None, mask: torch.Tensor = None) -> torch.Tensor:
         x = self.to_patch_embedding(x)
-        print(self.pos_embedding.shape, x.shape)
         x += self.pos_embedding
         x = self.dropout(x)
         x = self.transformer_encoder(x=x, context=context, mask=mask)
@@ -120,4 +115,3 @@ v = torch.randn((4, 3, 256, 256)).cuda()
 m = ViT(num_blocks=2, dim=768, image_size=256, patch_size=16).cuda()
 out = m(v)
 print(out.shape)
-
